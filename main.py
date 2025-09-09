@@ -65,7 +65,7 @@ def main(config: DictConfig):
             )
 
         useful_config_groups.append(parent_method_name)
-    
+
     # remove all unused config groups
     for config_group in list(config.keys()):
         if config_group not in useful_config_groups:
@@ -78,7 +78,7 @@ def main(config: DictConfig):
 if __name__ == "__main__":
     # For gather the Fl-bench logs and hydra logs
     # Otherwise the hydra logs are stored in ./outputs/...
-    sys.argv.append(
-        "hydra.run.dir=./out/${method}/${dataset.name}/${now:%Y-%m-%d-%H-%M-%S}"
-    )
+    # sys.argv.append(
+    #     "hydra.run.dir=./out/${method}/${dataset.name}/${now:%Y-%m-%d-%H-%M-%S}"
+    # )
     main()

@@ -1,12 +1,13 @@
 from collections import OrderedDict
 from functools import partial
 from typing import Optional
-
+from torchvision.transforms import Resize # 导入 Resize
 import torch
 import torch.nn as nn
 import torchvision.models as models
 from omegaconf import DictConfig
 from torch import Tensor
+import timm
 
 from src.utils.constants import DATA_SHAPE, INPUT_CHANNELS, NUM_CLASSES
 
@@ -483,6 +484,87 @@ class CustomModel(DecoupledModel):
         pass
 
 
+class PromptedViT(DecoupledModel):
+    def __init__(self, dataset: str, pretrained: bool = True, prompt_length: int = 10):
+        super().__init__()
+        # 加载 ViT 主干网络，不包含原始的分类头
+        self.backbone = timm.create_model(
+            "vit_base_patch16_224",
+            pretrained=pretrained,
+            num_classes=0
+        )
+
+        # 定义可学习的 prompt 参数，并用小的随机值初始化
+        self.prompt = nn.Parameter(torch.randn(prompt_length, self.backbone.embed_dim) * 0.02)
+
+        # 定义 prompt 的位置编码参数，同样随机初始化
+        self.pt_pos_embed = nn.Parameter(torch.randn(1, prompt_length, self.backbone.embed_dim) * 0.02)
+
+        # 定义可学习的分类器
+        self.classifier = nn.Linear(self.backbone.num_features, NUM_CLASSES[dataset])
+
+        # 定义数据预处理层
+        self.resize = Resize((224, 224), antialias=True)
+
+        # 按照格式要求，将 self.backbone 络赋值给 self.base
+        self.base = self.backbone
+
+        # 冻结 backbone 的所有参数
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+        # 明确 prompt 和 classifier 是可训练的
+        self.prompt.requires_grad = True
+        for param in self.classifier.parameters():
+            param.requires_grad = True
+
+        # 明确设置 prompt 的位置编码是不可学习的
+        self.pt_pos_embed.requires_grad = False
+
+    def _extract_features(self, x: torch.Tensor):
+        # 预处理：确保3通道和正确尺寸
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+        x = self.resize(x)                                              # [32,3,224,224]
+
+        B = x.shape[0]  # 获取 Batch Size
+
+        # 将图像转为 Patch Tokens
+        image_tokens = self.backbone.patch_embed(x)                     # [32,196,768]
+
+        # 扩展 prompt 和 cls_token 以匹配 Batch Size
+        prompt_tokens = self.prompt.unsqueeze(0).expand(B, -1, -1)      # [10,768]->[32,10,768]
+        cls_token = self.backbone.cls_token.expand(B, -1, -1)           # [1,768]->[32,1,768]
+
+        # 按照 [CLS, PROMPT, PATCH] 的顺序拼接 Tokens
+        combined_tokens = torch.cat((cls_token, prompt_tokens, image_tokens), dim=1)
+
+        # 在原始位置编码的基础上，新增 prompt 的位置编码
+        pos_embed = self.backbone.pos_embed
+        cls_pos = pos_embed[:, 0:1, :]
+        patch_pos = pos_embed[:, 1:, :]
+        combined_pos = torch.cat((cls_pos, self.pt_pos_embed, patch_pos), dim=1)
+
+        # 将 Tokens 和它们的位置编码相加
+        combined = combined_tokens + combined_pos
+
+        # 将 Tokens 送入 Transformer
+        feats = self.backbone.blocks(combined)
+
+        # 提取 CLS Token
+        cls_feats = feats[:, 0, :]
+
+        # 进行归一化
+        final = self.backbone.norm(cls_feats)
+        return final
+
+    def forward(self, x: torch.Tensor):
+        # 特征提取
+        f = self._extract_features(x)
+        # 分类
+        return self.classifier(f)
+
+
 MODELS = {
     "custom": CustomModel,
     "lenet5": LeNet5,
@@ -519,4 +601,5 @@ MODELS = {
     "vgg13": partial(VGG, version="13"),
     "vgg16": partial(VGG, version="16"),
     "vgg19": partial(VGG, version="19"),
+    "promptvit": PromptedViT,
 }
